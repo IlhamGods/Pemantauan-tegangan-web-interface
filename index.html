@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>High Voltage Monitor - IoT Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.0.0/firebase-app.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.0.0/firebase-database.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.0.0/firebase-auth.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .header {
+            text-align: center;
+            color: #333;
+            margin-bottom: 30px;
+        }
+        .current-reading {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 30px;
+            background: #e3f2fd;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .reading-card {
+            text-align: center;
+        }
+        .reading-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #1976d2;
+        }
+        .reading-label {
+            color: #666;
+            margin-top: 5px;
+        }
+        .charts-container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        .chart-container {
+            background: white;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            padding: 15px;
+        }
+        .controls {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        .btn-primary { background: #1976d2; color: white; }
+        .btn-success { background: #388e3c; color: white; }
+        .btn-danger { background: #d32f2f; color: white; }
+        .btn:hover { opacity: 0.9; }
+        .status {
+            text-align: center;
+            padding: 10px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+        .status.connected { background: #c8e6c9; color: #2e7d32; }
+        .status.disconnected { background: #ffcdd2; color: #c62828; }
+        @media (max-width: 768px) {
+            .charts-container {
+                grid-template-columns: 1fr;
+            }
+            .current-reading {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔌 High Voltage Monitor Dashboard</h1>
+            <p>Real-time DC Voltage Monitoring System (0 - 800V)</p>
+        </div>
+        
+        <div id="status" class="status disconnected">
+            🔴 Connecting to Firebase...
+        </div>
+        
+        <div class="current-reading">
+            <div class="reading-card">
+                <div id="currentVoltage" class="reading-value">0.00</div>
+                <div class="reading-label">Voltage (V)</div>
+            </div>
+            <div class="reading-card">
+                <div id="currentADC" class="reading-value">0</div>
+                <div class="reading-label">ADC Reading</div>
+            </div>
+            <div class="reading-card">
+                <div id="lastUpdate" class="reading-value">--:--:--</div>
+                <div class="reading-label">Last Update</div>
+            </div>
+        </div>
+        
+        <div class="charts-container">
+            <div class="chart-container">
+                <h3>📈 Voltage vs Time</h3>
+                <canvas id="voltageChart"></canvas>
+            </div>
+            <div class="chart-container">
+                <h3>🔢 Voltage vs ADC</h3>
+                <canvas id="adcChart"></canvas>
+            </div>
+        </div>
+        
+        <div class="controls">
+            <button class="btn btn-primary" onclick="refreshData()">🔄 Refresh</button>
+            <button class="btn btn-success" onclick="exportToCSV()">💾 Export CSV</button>
+            <button class="btn btn-danger" onclick="clearData()">🗑️ Clear Data</button>
+        </div>
+    </div>
+
+    <script>
+        // Firebase configuration
+        const firebaseConfig = {
+            apiKey: "YOUR_FIREBASE_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            databaseURL: "YOUR_FIREBASE_DATABASE_URL",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "YOUR_SENDER_ID",
+            appId: "YOUR_APP_ID"
+        };
+
+        // Initialize Firebase
+        import { initializeApp } from 'https://www.gstatic.com/firebasejs/9.0.0/firebase-app.js';
+        import { getDatabase, ref, onValue, remove } from 'https://www.gstatic.com/firebasejs/9.0.0/firebase-database.js';
+        import { getAuth, signInAnonymously } from 'https://www.gstatic.com/firebasejs/9.0.0/firebase-auth.js';
+
+        const app = initializeApp(firebaseConfig);
+        const database = getDatabase(app);
+        const auth = getAuth(app);
+
+        let voltageChart, adcChart;
+        let voltageData = [];
+        let adcData = [];
+        let timeLabels = [];
+        let currentUserId = null;
+
+        // Initialize charts
+        function initCharts() {
+            const voltageCtx = document.getElementById('voltageChart').getContext('2d');
+            const adcCtx = document.getElementById('adcChart').getContext('2d');
+
+            voltageChart = new Chart(voltageCtx, {
+                type: 'line',
+                data: {
+                    labels: timeLabels,
+                    datasets: [{
+                        label: 'Voltage (V)',
+                        data: voltageData,
+                        borderColor: '#1976d2',
+                        backgroundColor: 'rgba(25, 118, 210, 0.1)',
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        y: {
+                            beginAtZero: true,
+                            max: 850
+                        }
+                    }
+                }
+            });
+
+            adcChart = new Chart(adcCtx, {
+                type: 'scatter',
+                data: {
+                    datasets: [{
+                        label: 'ADC vs Voltage',
+                        data: adcData,
+                        backgroundColor: '#388e3c',
+                        borderColor: '#388e3c'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'ADC Reading'
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Voltage (V)'
+                            },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update status
+        function updateStatus(connected) {
+            const statusEl = document.getElementById('status');
+            if (connected) {
+                statusEl.className = 'status connected';
+                statusEl.innerHTML = '🟢 Connected to Firebase';
+            } else {
+                statusEl.className = 'status disconnected';
+                statusEl.innerHTML = '🔴 Disconnected from Firebase';
+            }
+        }
+
+        // Update current readings
+        function updateCurrentReadings(data) {
+            document.getElementById('currentVoltage').textContent = data.voltage.toFixed(2);
+            document.getElementById('currentADC').textContent = data.adc;
+            document.getElementById('lastUpdate').textContent = new Date(data.timestamp).toLocaleTimeString();
+        }
+
+        // Add data point
+        function addDataPoint(data) {
+            const time = new Date(data.timestamp).toLocaleTimeString();
+            
+            // Add to voltage chart
+            timeLabels.push(time);
+            voltageData.push(data.voltage);
+            
+            // Keep only last 50 points
+            if (timeLabels.length > 50) {
+                timeLabels.shift();
+                voltageData.shift();
+            }
+            
+            // Add to ADC chart
+            adcData.push({x: data.adc, y: data.voltage});
+            if (adcData.length > 100) {
+                adcData.shift();
+            }
+            
+            // Update charts
+            voltageChart.update();
+            adcChart.update();
+        }
+
+        // Export to CSV
+        function exportToCSV() {
+            let csv = 'Timestamp,Voltage(V),ADC,EpochTime\n';
+            
+            // Get all data (you might want to limit this)
+            const readingsRef = ref(database, `voltage_monitor/${currentUserId}/readings`);
+            onValue(readingsRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    Object.values(data).forEach(reading => {
+                        csv += `${reading.timestamp},${reading.voltage},${reading.adc},${reading.epochTime}\n`;
+                    });
+                    
+                    // Download CSV
+                    const blob = new Blob([csv], { type: 'text/csv' });
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `voltage_monitor_${new Date().toISOString().split('T')[0]}.csv`;
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                }
+            }, { once: true });
+        }
+
+        // Clear data
+        function clearData() {
+            if (confirm('Are you sure you want to clear all data? This action cannot be undone.')) {
+                const readingsRef = ref(database, `voltage_monitor/${currentUserId}/readings`);
+                remove(readingsRef).then(() => {
+                    alert('Data cleared successfully!');
+                    voltageData.length = 0;
+                    adcData.length = 0;
+                    timeLabels.length = 0;
+                    voltageChart.update();
+                    adcChart.update();
+                }).catch((error) => {
+                    alert('Error clearing data: ' + error.message);
+                });
+            }
+        }
+
+        // Refresh data
+        function refreshData() {
+            location.reload();
+        }
+
+        // Initialize app
+        signInAnonymously(auth).then((userCredential) => {
+            currentUserId = userCredential.user.uid;
+            updateStatus(true);
+            
+            // Listen for latest reading
+            const latestRef = ref(database, `voltage_monitor/${currentUserId}/latest`);
+            onValue(latestRef, (snapshot) => {
+                const data = snapshot.val();
+                if (data) {
+                    updateCurrentReadings(data);
+                    addDataPoint(data);
+                }
+            });
+            
+        }).catch((error) => {
+            console.error('Authentication failed:', error);
+            updateStatus(false);
+        });
+
+        // Initialize charts when page loads
+        window.onload = function() {
+            initCharts();
+        };
+    </script>
+</body>
+</html>
